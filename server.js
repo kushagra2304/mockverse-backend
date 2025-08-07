@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 5000;
 
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://your-vercel-frontend.vercel.app' // Replace with actual URL when deployed
+  'https://mockverse-frontend.vercel.app/' 
 ];
 
 app.use(cors({
