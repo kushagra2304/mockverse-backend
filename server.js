@@ -50,25 +50,24 @@ db.connect((err) => {
 });
 
 //SIGNUP API
-app.post("/api/signup", (req, res) => {
+// SIGNUP API
+app.post("/api/signup", async (req, res) => {
   const { name, email, password, phone_number } = req.body;
-
   const sql = `
     INSERT INTO users (name, email, password)
     VALUES (?, ?, ?)
   `;
-
-  db.query(sql, [name, email, password], (err, result) => {
-    if (err) {
-      console.error("Error inserting user:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
+  try {
+    await db.query(sql, [name, email, password]);
     res.status(200).json({ message: "User registered successfully!" });
-  });
+  } catch (err) {
+    console.error("Error inserting user:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // LOGIN API
-app.post("/api/login", (req, res) => {
+app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
 
   console.log("🟡 Login Attempt:");
@@ -82,12 +81,8 @@ app.post("/api/login", (req, res) => {
 
   const sql = `SELECT id, name, email, password FROM users WHERE email = ?`;
 
-  db.query(sql, [email], (err, results) => {
-    if (err) {
-      console.error("❌ Error during login:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
+  try {
+    const [results] = await db.query(sql, [email]);
     if (results.length === 0) {
       console.warn("❌ No user found with this email");
       return res.status(401).json({ error: "Invalid email" });
@@ -100,14 +95,11 @@ app.post("/api/login", (req, res) => {
 
     if (user.password === password) {
       console.log("✅ Password matched. Login successful!");
-      
-      // Don't send password in the response
       const userData = {
         id: user.id,
         name: user.name,
         email: user.email,
       };
-
       return res.status(200).json({
         success: true,
         message: "Login successful!",
@@ -117,10 +109,11 @@ app.post("/api/login", (req, res) => {
       console.warn("❌ Password mismatch");
       return res.status(401).json({ error: "Invalid password" });
     }
-  });
+  } catch (err) {
+    console.error("❌ Error during login:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
-
-
 
 /**
  * Route: POST /start-interview
