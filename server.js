@@ -13,8 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 const allowedOrigins = [
-  'http://localhost:5173',
-  'https://mockverse-frontend.vercel.app/' 
+  "https://mockverse-frontend.vercel.app/"
 ];
 
 app.use(cors({
