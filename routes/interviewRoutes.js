@@ -9,6 +9,7 @@ import {
   getScore,
 } from "../controllers/interviewController.js";
 
+
 const router = express.Router();
 
 router.post("/start-interview", startInterview);
