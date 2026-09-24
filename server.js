@@ -287,6 +287,192 @@ app.get('/interview/score/:sessionId', async (req, res) => {
 
 
 
+const JUDGE0_HOST = process.env.JUDGE0_HOST || "judge0-ce.p.rapidapi.com";
+const JUDGE0_BASE_URL = `https://${JUDGE0_HOST}`;
+const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY;
+
+function judge0Headers(extra = {}) {
+  return {
+    "X-RapidAPI-Key": JUDGE0_API_KEY,
+    "X-RapidAPI-Host": JUDGE0_HOST,
+    ...extra,
+  };
+}
+
+let languageIdCachePromise = null;
+
+async function resolveLanguageIds() {
+  if (languageIdCachePromise) return languageIdCachePromise;
+
+  languageIdCachePromise = (async () => {
+    if (!JUDGE0_API_KEY) {
+      throw new Error(
+        "JUDGE0_API_KEY is not set. Add it to backend/.env (see setup instructions)."
+      );
+    }
+
+    const response = await fetch(`${JUDGE0_BASE_URL}/languages`, {
+      headers: judge0Headers(),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Failed to fetch Judge0 languages (${response.status}): ${text}`);
+    }
+
+    const languages = await response.json();
+
+    const findId = (predicate, label) => {
+      const match = languages.find(predicate);
+      if (!match) {
+        throw new Error(`Could not find a Judge0 language match for ${label}`);
+      }
+      return match.id;
+    };
+
+    const ids = {
+      javascript: findId(
+        (l) => l.name.includes("JavaScript") && l.name.includes("Node"),
+        "JavaScript (Node.js)"
+      ),
+      python: findId((l) => l.name.startsWith("Python (3"), "Python 3"),
+      cpp: findId((l) => l.name.includes("C++ (GCC"), "C++ (GCC)"),
+    };
+
+    console.log("✅ Resolved Judge0 language ids:", ids);
+    return ids;
+  })();
+
+  languageIdCachePromise.catch(() => {
+    languageIdCachePromise = null;
+  });
+
+  return languageIdCachePromise;
+}
+
+// Judge0 status ids: 1/2 = queued/processing (shouldn't see these with wait=true),
+// 3 = Accepted, 6 = Compilation Error. Everything else (4/5/7-14) is some
+// flavor of runtime failure (wrong answer isn't a Judge0 concept here since
+// we're not passing expected_output — we diff stdout ourselves).
+const JUDGE0_ACCEPTED = 3;
+const JUDGE0_COMPILE_ERROR = 6;
+
+function decodeBase64(value) {
+  return value ? Buffer.from(value, "base64").toString("utf-8") : "";
+}
+
+async function runOnJudge0(languageKey, source, stdin) {
+  const ids = await resolveLanguageIds();
+  const languageId = ids[languageKey];
+  if (!languageId) {
+    throw new Error(`Unsupported language: ${languageKey}`);
+  }
+
+  const response = await fetch(
+    `${JUDGE0_BASE_URL}/submissions?base64_encoded=true&wait=true`,
+    {
+      method: "POST",
+      headers: judge0Headers({ "content-type": "application/json" }),
+      body: JSON.stringify({
+        language_id: languageId,
+        source_code: Buffer.from(source, "utf-8").toString("base64"),
+        stdin: Buffer.from(stdin || "", "utf-8").toString("base64"),
+      }),
+    }
+  );
+
+  if (response.status === 429) {
+    throw new Error(
+      "Judge0 free-tier daily limit reached. Try again tomorrow, or upgrade your RapidAPI plan."
+    );
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Judge0 request failed (${response.status}): ${text}`);
+  }
+
+  const data = await response.json();
+
+  const stdout = decodeBase64(data.stdout);
+  const stderr = decodeBase64(data.stderr);
+  const compileOutput = decodeBase64(data.compile_output);
+  const statusId = data.status?.id;
+  const statusDescription = data.status?.description || "";
+
+  const compileStderr =
+    statusId === JUDGE0_COMPILE_ERROR ? compileOutput || statusDescription : null;
+
+  const finalStderr =
+    statusId && statusId !== JUDGE0_ACCEPTED && statusId !== JUDGE0_COMPILE_ERROR
+      ? [statusDescription, stderr].filter(Boolean).join("\n")
+      : stderr;
+
+  return {
+    stdout,
+    stderr: finalStderr,
+    output: stdout || finalStderr,
+    code: statusId,
+    signal: null,
+    compileStderr,
+  };
+}
+
+app.post("/execute", async (req, res) => {
+  const { language, source, stdin } = req.body;
+
+  if (!language || !source) {
+    return res.status(400).json({ error: "language and source are required" });
+  }
+
+  try {
+    const result = await runOnJudge0(language, source, stdin);
+    res.json(result);
+  } catch (err) {
+    console.error("❌ Judge0 execution failed:", err.message);
+    res.status(500).json({ error: "Code execution failed", details: err.message });
+  }
+});
+
+app.post("/run-tests", async (req, res) => {
+  const { language, source, testCases } = req.body;
+
+  if (!language || !source || !Array.isArray(testCases)) {
+    return res.status(400).json({ error: "language, source, and testCases[] are required" });
+  }
+
+  try {
+    const results = [];
+    for (const testCase of testCases) {
+      const { stdout, stderr, compileStderr } = await runOnJudge0(language, source, testCase.input);
+
+      if (compileStderr) {
+        return res.json({
+          compileError: compileStderr,
+          results,
+        });
+      }
+
+      const actual = stdout.trim();
+      const expected = (testCase.expectedOutput || "").trim();
+
+      results.push({
+        input: testCase.input,
+        expectedOutput: expected,
+        actualOutput: actual,
+        stderr: stderr || null,
+        passed: actual === expected,
+      });
+    }
+
+    const passedCount = results.filter((r) => r.passed).length;
+    res.json({ results, passedCount, totalCount: results.length });
+  } catch (err) {
+    console.error("❌ Test run failed:", err.message);
+    res.status(500).json({ error: "Test run failed", details: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
